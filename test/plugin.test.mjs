@@ -176,6 +176,23 @@ test("chat.headers keeps the honest client UA that Cloudflare lets through", asy
   assert.equal(out2.headers.accept, "text/event-stream")
 })
 
+test("the address prompt validates as magpie's Go side expects: string or nothing", async () => {
+  const plugin = await BailucodeAuthPlugin({}, {})
+  const [{ prompts }] = plugin.auth.methods
+  const { validate } = prompts[0]
+  assert.equal(validate(""), undefined)
+  assert.equal(validate("   "), undefined)
+  assert.equal(validate("https://bailucode.com/openapi/v1"), undefined)
+  assert.equal(validate("http://bailucode.com/openapi/v1"), undefined)
+  // a bool here fails the login with "cannot unmarshal bool into ... .error of type string"
+  assert.equal(typeof validate("bailucode.com"), "string")
+  assert.equal(typeof validate("ftp://x"), "string")
+  assert.equal(typeof validate("https://u:p@x/?q=1"), "string")
+  for (const bad of ["bailucode.com", "ftp://x", "https://u:p@x/?q=1", "not a url"]) {
+    assert.notEqual(typeof validate(bad), "boolean")
+  }
+})
+
 test("usage is null without a key", async () => {
   const plugin = await BailucodeAuthPlugin({}, {})
   assert.equal(await plugin.auth.usage(async () => ({ type: "api" })), null)

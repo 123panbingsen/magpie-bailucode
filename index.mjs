@@ -172,14 +172,20 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
             key: "baseURL",
             message: `API 地址（默认 ${BASE}，一般直接回车）`,
             placeholder: BASE,
+            // magpie's Go side decodes this as a string: undefined when the
+            // value is fine, a message otherwise. Returning `true` fails the
+            // whole login with "cannot unmarshal bool into ... .error of type string".
             validate: (value) => {
               const text = typeof value === "string" ? value.trim() : ""
-              if (!text) return true
+              if (!text) return undefined
+              if (!/^https?:\/\//i.test(text)) return "地址需要 http(s)://"
               try {
-                const url = new URL(/^https?:\/\//i.test(text) ? text : "https://" + text)
-                return /^https?:$/.test(url.protocol) ? true : "地址需要 http(s)://"
+                const url = new URL(text)
+                if (url.protocol !== "https:" && url.protocol !== "http:") return "地址需要 http(s)://"
+                if (url.username || url.password || url.search || url.hash) return "地址不要带账号、查询串或片段"
+                return undefined
               } catch {
-                return "地址格式不对"
+                return "地址格式不对，例如 https://bailucode.com/openapi/v1"
               }
             },
           },
