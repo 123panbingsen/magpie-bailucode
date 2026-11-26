@@ -1,0 +1,48 @@
+{
+  "name": "magpie-bailucode",
+  "version": "0.1.0",
+  "description": "BAILU AI (bailucode.com/openapi) as a magpie provider: one API key, OpenAI Chat Completions / Anthropic Messages / Responses faces, models discovered from the key.",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "opencode",
+    "opencode-plugin",
+    "bailucode",
+    "bailu",
+    "白鹿",
+    "ai"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "magpie": {
+    "name": "BAILU（白鹿）",
+    "summary": {
+      "zh": "白鹿 Open Platform（bailucode.com/openapi）接入 magpie：粘贴 API key 即可用白鹿模型，模型列表从 key 实时拉取，卡片显示 key 是否被网关接受。",
+      "en": "BAILU Open Platform (bailucode.com/openapi) for magpie: paste an API key, models are discovered from the key, and the card says whether the gateway accepts it."
+    },
+    "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iYmciIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzNiODJmNiIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEwMCUiIHN0b3AtY29sb3I9IiMxZTQwYWYiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgcng9IjE0IiBmaWxsPSJ1cmwoI2JnKSIvPgogIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDMyLDMyKSIgZmlsbD0iI2ZmZiI+CiAgICA8cGF0aCBkPSJNLTMtMTloNmwxLjIgNS4yYTEyLjUgMTIuNSAwIDAgMSAzLjYgMi4xbDUtMS44IDMgNS4yLTMuOCAzLjRhMTIuNSAxMi41IDAgMCAxIDAgNC4ybDMuOCAzLjQtMyA1LjItNS0xLjhhMTIuNSAxMi41IDAgMCAxLTMuNiAyLjFMMyAxOWgtNmwtMS4yLTUuMmExMi41IDEyLjUgMCAwIDEtMy42LTIuMWwtNSAxLjgtMy01LjIgMy44LTMuNGExMi41IDEyLjUgMCAwIDEgMC00LjJsLTMuOC0zLjQgMy01LjIgNSAxLjhhMTIuNSAxMi41IDAgMCAxIDMuNi0yLjFaIi8+CiAgICA8Y2lyY2xlIHI9IjYiIGZpbGw9IiMzYjgyZjYiLz4KICA8L2c+Cjwvc3ZnPgo="
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/123panbingsen/magpie-bailucode"
+  },
+  "homepage": "https://github.com/123panbingsen/magpie-bailucode#readme",
+  "bugs": {
+    "url": "https://github.com/123panbingsen/magpie-bailucode/issues"
+  }
+}
