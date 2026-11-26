@@ -484,6 +484,13 @@ const CLAIMS = {
   openclaw: { url: "https://bailucode.com/api/api_keys", action: "claim_openclaw_promo", label: "白鹿 API 总额度补充" },
 }
 
+// 门户按北京时间的自然日发这份额度。
+function nextPortalMidnight(now = new Date()) {
+  const shifted = new Date(now.getTime() + 8 * 3600_000)
+  const day = new Date(Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate() + 1))
+  return new Date(day.getTime() - 8 * 3600_000).toISOString()
+}
+
 async function claimOne(cookie, target, ticket, fetchImpl = fetchImplGlobal) {
   const body = { action: target.action, ...(ticket ? { captcha_ticket: ticket } : {}) }
   const res = await fetchImpl("https://bailucode.com" + target.url, {
@@ -692,45 +699,49 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
       usageCache.set(scope, { at: Date.now(), value })
       return value
     },
-    // magpie 的签到钩子：只对有 ticket 的可领项动手，其余如实说明。
+    // magpie 的签到钩子（契约抄自 host 源码）：
+    // outcome: claimed | done | ineligible | inactive | captcha | failed,
+    // 另有 credit / streak / message / until（厂商自己的一天什么时候翻）。
     async checkin(getAuth) {
       const auth = await getAuth()
       if (auth?.type !== "api" || !auth.key) return { outcome: "ineligible", message: "还没有登录" }
       const jar = readSession(auth)
       if (!jar) return { outcome: "ineligible", message: "没有通行证会话：先走一次「浏览器登录」" }
+      const midnight = nextPortalMidnight()
       let wallet
       try {
         wallet = (await portalWallet(jar, fetchImpl)).wallet
       } catch (error) {
-        return { outcome: "ineligible", message: error?.message || "读不到门户" }
+        return { outcome: "failed", message: error?.message || "读不到门户", until: midnight }
       }
       const claims = Array.isArray(wallet?.claims) ? wallet.claims : []
-      if (!claims.length) return { outcome: "failed", message: "门户没有给出今日可领项" }
+      if (!claims.length) return { outcome: "failed", message: "门户没有给出今日可领项", until: midnight }
       const pending = claims.filter((c) => !c.claimed && CLAIMS[c.id])
-      if (!pending.length) return { outcome: "already", message: "今天三项都已领取" }
+      if (!pending.length) return { outcome: "done", message: "今天三项都已领取", until: midnight }
       const ticket = String(options.captchaTicket || process.env.BAILUCODE_CAPTCHA || "").trim()
       const done = []
-      let amount = 0
+      let credit = 0
       for (const claim of pending) {
         const target = CLAIMS[claim.id]
         const { data } = await claimOne(jar, target, ticket, fetchImpl)
         if (data?.success || data?.already_claimed) {
-          done.push(`${target.label}${data?.already_claimed ? "已领" : "+" + (claim.reward || 0)}`)
-          amount += Number(claim.reward) || 0
+          done.push(`${target.label}${data?.already_claimed ? "已领" : `+${claim.reward || 0}`}`)
+          credit += Number(claim.reward) || 0
           continue
         }
         if (/人机验证|安全验证|滑块/.test(String(data?.message || ""))) {
           usageCache.clear()
           return {
-            outcome: done.length ? "claimed" : "manual",
-            message: `${done.length ? done.join(" · ") + "；" : ""}还差人机验证：打开 ${PORTAL} 点一次「${target.label}」的领取，再在 magpie 里点签到即可`,
-            ...(amount ? { amount } : {}),
+            outcome: done.length ? "claimed" : "captcha",
+            message: `${done.length ? done.join(" · ") + "；" : ""}门户要人机验证：去 ${PORTAL} 点一次「${target.label}」的领取`,
+            ...(credit ? { credit } : {}),
+            until: midnight,
           }
         }
-        return { outcome: "failed", message: data?.message || `领取失败（HTTP ${data ? "" : "?"}）` }
+        return { outcome: "failed", message: data?.message || "领取失败", until: midnight }
       }
       usageCache.clear()
-      return { outcome: "claimed", message: done.join(" · ") || "已领取", ...(amount ? { amount } : {}) }
+      return { outcome: "claimed", message: done.join(" · ") || "已领取", credit, until: midnight }
     },
   }
 
