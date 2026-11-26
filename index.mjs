@@ -30,7 +30,15 @@ const PROVIDER_NAME = "BAILU（白鹿）"
 const BASE = "https://bailucode.com/openapi/v1"
 const KEY_PAGE = "https://bailucode.com/api_platform/#api-keys"
 const PORTAL = "https://bailucode.com/auth/"
-const VERSION = "0.2.0"
+// The UA and the package's version are the same number.
+const VERSION = (() => {
+  try {
+    const { version } = JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"))
+    return typeof version === "string" ? version : "0.0.0"
+  } catch {
+    return "0.0.0"
+  }
+})()
 
 // Where a 白鹿通行证 cookie may be kept. First one found wins.
 const SESSION_CANDIDATES = [
@@ -189,17 +197,28 @@ function resetsAtFrom(html, now = new Date()) {
 
 const PACK_LABELS = { anthropic: "Anthropic 协议 定向" }
 
+// A number the page actually said, or nothing. `Number(x) || 0` turned a
+// field that had been renamed into a confident "0 Credits, used 100%".
+const numberOr = (value) => {
+  if (value === null || value === undefined || value === "") return undefined
+  const n = Number(value)
+  return Number.isFinite(n) ? n : undefined
+}
+
 // windows, as magpie draws them: used is a percentage, display is the line.
+// A row whose source fields are absent is left out: an unknown balance must
+// not read as an empty one.
 function quotaWindows(S, html, now = new Date()) {
   const windows = []
   const code = S?.code ?? {}
   const api = S?.api ?? {}
 
-  const planRemain = Number(code.planRemain) || 0
-  const planQuota = Number(code.planQuota) || 0
-  const addonCredits = (Number(code.addonTokens) || 0) / 1000 // 1,000 tokens = 1 credit
-  const creditsLeft = planRemain + addonCredits
-  if (creditsLeft > 0 || planQuota > 0) {
+  const planRemain = numberOr(code.planRemain)
+  const planQuota = numberOr(code.planQuota)
+  const addonTokens = numberOr(code.addonTokens)
+  if (planRemain !== undefined && planQuota !== undefined) {
+    const addonCredits = (addonTokens ?? 0) / 1000 // 1,000 tokens = 1 credit
+    const creditsLeft = planRemain + addonCredits
     windows.push({
       name: "白鹿编码",
       used: planQuota > 0 ? Math.max(0, Math.min(100, ((planQuota - planRemain) / planQuota) * 100)) : 0,
@@ -210,9 +229,10 @@ function quotaWindows(S, html, now = new Date()) {
     })
   }
 
-  const usedEff = Number(api.usedEff ?? api.used) || 0
-  const quotaEff = Number(api.quotaEff ?? api.quota) || 0
-  if (quotaEff > 0) {
+  const usedEff = numberOr(api.usedEff ?? api.used)
+  const quotaEff = numberOr(api.quotaEff ?? api.quota)
+  if (usedEff !== undefined && quotaEff !== undefined && quotaEff > 0) {
+    const reset = resetsAtFrom(html, now)
     windows.push({
       name: "API 平台",
       used: Math.max(0, Math.min(100, (usedEff / quotaEff) * 100)),
@@ -220,14 +240,14 @@ function quotaWindows(S, html, now = new Date()) {
       limit: quotaEff,
       display: `${fmtNum(usedEff)} / ${fmtCN(quotaEff)} Tokens`,
       unit: "tokens",
-      ...(resetsAtFrom(html, now) ? { resetsAt: resetsAtFrom(html, now) } : {}),
+      ...(reset ? { resetsAt: reset } : {}),
     })
   }
 
   for (const pack of Array.isArray(S?.packs) ? S.packs : []) {
-    const total = Number(pack?.q) || 0
-    if (total <= 0) continue
-    const used = Number(pack?.u) || 0
+    const total = numberOr(pack?.q)
+    const used = numberOr(pack?.u)
+    if (total === undefined || used === undefined || total <= 0) continue
     windows.push({
       name: PACK_LABELS[pack?.id] ?? `${pack?.id} 定向`,
       used: Math.max(0, Math.min(100, (used / total) * 100)),
@@ -240,7 +260,6 @@ function quotaWindows(S, html, now = new Date()) {
   }
   return windows
 }
-
 // ---- signing in through a browser ----------------------------------------------
 
 // Only bailucode.com's own cookies; the string is what the portal expects.
@@ -358,8 +377,11 @@ async function portalWallet(cookie, fetchImpl = fetchImplGlobal) {
 async function browserSignIn({ log, timeoutMs = 5 * 60_000, profileDir, url = `${PORTAL}login?return_url=%2Fauth%2F` }) {
   const executables = browserExecutables()
   if (!executables.length) throw new Error("找不到 Chrome 或 Edge")
-  const dir = profileDir ?? path.join(os.tmpdir(), "magpie-bailucode-browser")
-  fs.mkdirSync(dir, { recursive: true })
+  // One throwaway profile per sign-in: reusing a fixed directory would keep
+// the previous account's cookies and sign the next person straight into it.
+const owned = !profileDir
+const dir = profileDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "magpie-bailucode-browser-"))
+fs.mkdirSync(dir, { recursive: true })
   for (const file of ["DevToolsActivePort", "SingletonLock"]) {
     try {
       fs.rmSync(path.join(dir, file), { force: true })
@@ -426,6 +448,11 @@ async function browserSignIn({ log, timeoutMs = 5 * 60_000, profileDir, url = `$
     throw new Error("等待登录超时（5 分钟）")
   } finally {
     await closeBrowser()
+    if (owned) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+      } catch {}
+    }
   }
 }
 
@@ -453,11 +480,10 @@ async function portalKeys(cookie, fetchImpl = fetchImplGlobal) {
   return { keys: Array.isArray(body.keys) ? body.keys : [] }
 }
 
-const workingKey = (keys) => {
-  const list = Array.isArray(keys) ? keys : []
-  const usable = list.filter((k) => k && typeof k.api_key_full === "string" && k.api_key_full.startsWith("sk-"))
-  return usable.find((k) => k.is_active === 1 || k.is_active === true) ?? usable[0] ?? null
-}
+// A disabled key is not a key: the account has none, and one gets created.
+const keyUsable = (k) =>
+  !!k && typeof k.api_key_full === "string" && k.api_key_full.startsWith("sk-") && (k.is_active === 1 || k.is_active === true)
+const workingKey = (keys) => (Array.isArray(keys) ? keys : []).find(keyUsable) ?? null
 
 async function portalCreateKey(cookie, name = "magpie", fetchImpl = fetchImplGlobal) {
   const res = await fetchImpl("https://bailucode.com/api/api_keys", {
@@ -496,7 +522,7 @@ function nextPortalMidnight(now = new Date()) {
 
 async function claimOne(cookie, target, ticket, fetchImpl = fetchImplGlobal) {
   const body = { action: target.action, ...(ticket ? { captcha_ticket: ticket } : {}) }
-  const res = await fetchImpl("https://bailucode.com" + target.url, {
+  const res = await fetchImpl(target.url, {
     method: "POST",
     headers: { cookie, "user-agent": `magpie-bailucode/${VERSION}`, accept: "application/json", "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -555,45 +581,42 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
     return modelIds(body)
   }
 
-  // A 白鹿通行证 cookie, kept out of the sign-in flow: the env var, the plugin
-  // option, or a file. Nothing here is required for the provider to work.
+  // The 白鹿通行证 session belongs to the account it was signed in on: the
+  // browser route stores it in that account's own metadata. A file or an env
+  // var is read only when the user names it, so two accounts never trade one
+  // machine's session (and a pasted key never shows someone else's wallet).
   function readSession(auth) {
     if (options.session === false) return null
-    if (typeof options.session === "string" && options.session.trim()) return options.session.trim()
     const kept = auth?.metadata?.session
     if (typeof kept === "string" && kept.trim()) return kept.trim()
+    if (typeof options.session === "string" && options.session.trim()) return options.session.trim()
     if (typeof process.env.BAILUCODE_SESSION === "string" && process.env.BAILUCODE_SESSION.trim()) {
       return process.env.BAILUCODE_SESSION.trim()
     }
-    const files = [...(typeof options.sessionFile === "string" ? [options.sessionFile] : []), ...SESSION_CANDIDATES]
-    for (const file of files) {
+    if (typeof options.sessionFile === "string" && options.sessionFile.trim()) {
       try {
-        const text = fs.readFileSync(file, "utf8").trim()
+        const text = fs.readFileSync(options.sessionFile, "utf8").trim()
         if (text) return text
       } catch {}
     }
     return null
   }
 
-  // The dashboard page, not an API: reads only, and the cookie never leaves.
-  async function portalDashboard(k) {
-    return portalWallet(k, fetchImpl)
-  }
-
-  // Persist the cookie the browser sign-in produced, so the card keeps
-  // showing the wallet on later runs without another login.
+  // Only when the user asked for a file. The browser route keeps its session
+  // in the account's metadata; the files it used to write are what let two
+  // accounts read one wallet.
   function saveSession(cookie) {
-    const file = typeof options.sessionFile === "string" ? options.sessionFile : SESSION_CANDIDATES[0]
-    if (!file) return
+    if (typeof options.sessionFile !== "string" || !options.sessionFile.trim()) return
+    const file = options.sessionFile
     try {
-      fs.mkdirSync(path.dirname(file), { recursive: true })
-      fs.writeFileSync(file, cookie + "\n")
-      log(`通行证会话已写入 ${file}`)
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+      fs.writeFileSync(file, cookie + "\n", { mode: 0o600 })
+      fs.chmodSync(file, 0o600)
+      log(`通行证会话已写入 ${file}（0600）`)
     } catch (error) {
       log(`会话没能落盘：${error?.message || error}`)
     }
   }
-
   const authHook = {
     provider: PROVIDER,
     async loader(getAuth) {
@@ -620,9 +643,11 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
           instructions: "在打开的浏览器里用邮箱验证码登录，插件会自己接住并取回你的 API key",
           method: "auto",
           opened: true,
-          callback: async () => {
-            // 已有一份能用的通行证会话时，不开浏览器：直接拿它换 key。
-            let jar = readSession()
+          callback: async (result) => {
+            // 这个账号自己的会话（magpie 把上一次登录的 metadata 交回来）；
+            // 没有的话才开浏览器，绝不去读全局文件里的别人的会话。
+            const mine = result?.metadata?.session
+            let jar = typeof mine === "string" && mine.trim() ? mine.trim() : null
             if (jar) {
               const live = await portalWallet(jar, fetchImpl).catch(() => null)
               if (live) {
@@ -646,7 +671,7 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
               log("门户里没有可用 key，已新建一枚 magpie key")
             }
             saveSession(jar)
-            return { type: "success", key, metadata: { browser: "chrome" } }
+            return { type: "success", key, metadata: { browser: "chrome", session: jar } }
           },
         }),
       },
@@ -665,20 +690,22 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
       let value
       if (session) {
         try {
-          const { wallet, html, email } = await portalDashboard(session)
+          const { wallet, html, email } = await portalWallet(session, fetchImpl)
           const windows = quotaWindows(wallet, html)
           value = {
             plan: "白鹿通行证",
             windows,
             ...(email ? { user: String(email) } : {}),
             ...(wallet?.api?.ok === false ? { error: "API 额度当前不可用（门户显示未开通或已停用）" } : {}),
+            // 一行都算不出来 = 读到的字段不认识，不是「余额为 0」
+            ...(windows.length ? {} : { error: "门户的额度字段读不到（页面可能改版），不敢当成 0 显示" }),
           }
           log(`BAILU: quota read — ${windows.length} window(s)`)
         } catch (error) {
           value = error?.expired
             ? {
                 plan: "白鹿通行证",
-                error: `通行证会话已过期：浏览器重新登录 ${PORTAL} 后，把 Cookie 覆盖到 ${SESSION_CANDIDATES[0] ?? "session 文件"}`,
+                error: `通行证会话已过期：重新跑一次「浏览器登录白鹿通行证」即可（会话按账号保存，不写全局文件）`,
               }
             : error?.cloudflare
               ? { plan: "白鹿通行证", error: CLOUDFLARE_HINT }
@@ -726,7 +753,12 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
       let credit = 0
       for (const claim of pending) {
         const target = CLAIMS[claim.id]
-        const { data } = await claimOne(jar, target, ticket, fetchImpl)
+        let data
+        try {
+          ;({ data } = await claimOne(jar, target, ticket, fetchImpl))
+        } catch (error) {
+          return { outcome: "failed", message: `${target.label}：${error?.message || error}`, until: midnight }
+        }
         if (data?.success || data?.already_claimed) {
           done.push(`${target.label}${data?.already_claimed ? "已领" : `+${claim.reward || 0}`}`)
           credit += Number(claim.reward) || 0
@@ -792,7 +824,12 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
     // "Chrome/131" UA over a non-browser TLS stack gets an HTML 403, while an
     // honest client UA reaches the gateway (verified against the live site).
     // Keep every request carrying this UA, whatever the SDK would send.
-    "chat.headers": async (_input, output) => {
+    "chat.headers": async (input, output) => {
+      // magpie calls every plugin's chat.headers for every provider's request:
+      // without this guard, Cursor/Kiro/Qoder requests would go out with this
+      // plugin's user agent and accept header.
+      const owner = input?.model?.providerID ?? input?.provider?.info?.id ?? input?.provider?.id
+      if (owner !== PROVIDER) return
       try {
         output.headers ??= {}
         output.headers["user-agent"] = `magpie-bailucode/${VERSION}`

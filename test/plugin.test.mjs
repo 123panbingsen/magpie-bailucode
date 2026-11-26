@@ -165,16 +165,24 @@ test("usage names the proxy problem when Cloudflare answers instead of the gatew
   assert.match(refused.error, /Cloudflare/)
 })
 
-test("chat.headers keeps the honest client UA that Cloudflare lets through", async () => {
+test("chat.headers keeps the honest client UA on this provider only", async () => {
   const plugin = await BailucodeAuthPlugin({}, {})
-  const output = { headers: {} }
-  await plugin["chat.headers"]({ model: "bailu-2.9-preview" }, output)
-  assert.match(output.headers["user-agent"], /^magpie-bailucode\/\d+\.\d+\.\d+$/)
-  assert.equal(output.headers.accept, "application/json")
+  const mine = { headers: {} }
+  await plugin["chat.headers"]({ model: { providerID: "bailucode" } }, mine)
+  assert.match(mine.headers["user-agent"], /^magpie-bailucode\/\d+\.\d+\.\d+$/)
+  assert.equal(mine.headers.accept, "application/json")
+
+  // magpie runs every plugin's chat.headers for every provider's request:
+  // another vendor's request must come out byte for byte untouched.
+  for (const owner of ["cursor", "kiro", "qoder", undefined]) {
+    const other = { headers: {} }
+    await plugin["chat.headers"]({ model: { providerID: owner } }, other)
+    assert.deepEqual(other.headers, {}, `${owner} request was rewritten`)
+  }
 
   const custom = await BailucodeAuthPlugin({}, { headers: { "x-team": "lab" } })
   const out2 = { headers: { accept: "text/event-stream" } }
-  await custom["chat.headers"]({}, out2)
+  await custom["chat.headers"]({ model: { providerID: "bailucode" } }, out2)
   assert.equal(out2.headers["x-team"], "lab")
   assert.equal(out2.headers.accept, "text/event-stream")
 })
@@ -268,7 +276,8 @@ test("an expired portal session says so and where to refresh it", async () => {
   const usage = await plugin.auth.usage(async () => fakeAuth())
   assert.equal(usage.plan, "白鹿通行证")
   assert.match(usage.error, /会话已过期/)
-  assert.match(usage.error, /session\.txt|session/)
+  assert.match(usage.error, /会话已过期/)
+  assert.match(usage.error, /浏览器登录/)
 })
 
 test("without a session the card falls back to the key check, never the portal", async () => {
@@ -297,15 +306,15 @@ test("DevToolsActivePort's first line is the port", () => {
   assert.equal(_internal.parseDevToolsPort(""), null)
 })
 
-test("the working key is a full sk- key, active one first", () => {
-  const keys = [
-    { api_key_full: "sk-old", is_active: 0 },
-    { api_key_full: "sk-live", is_active: 1 },
-  ]
-  assert.equal(_internal.workingKey(keys).api_key_full, "sk-live")
-  assert.equal(_internal.workingKey([{ api_key_full: "sk-only" }]).api_key_full, "sk-only")
-  assert.equal(_internal.workingKey([]), null)
+test("only an active, full key counts: a disabled one means create a new key", () => {
+  const live = { api_key_full: "sk-live", is_active: 1 }
+  const off = { api_key_full: "sk-disabled", is_active: 0 }
+  assert.equal(_internal.workingKey([off, live]).api_key_full, "sk-live")
+  assert.equal(_internal.workingKey([live]).api_key_full, "sk-live")
+  assert.equal(_internal.workingKey([off]), null)
+  assert.equal(_internal.workingKey([{ api_key_full: "sk-no-flag" }]), null)
   assert.equal(_internal.workingKey([{ api_key_masked: "sk-…" }]), null)
+  assert.equal(_internal.workingKey([]), null)
 })
 
 function portalFetch(handlers) {
@@ -415,4 +424,76 @@ test("with a captcha ticket the claim goes through", async () => {
   assert.equal(got.credit, 10500000)
   assert.match(got.message, /白鹿编码签到/)
   assert.match(got.until, /T\d{2}:00:00\.000Z$/) // 00:00 Asia/Shanghai
+})
+
+// ---- 复核补充 -------------------------------------------------------------------
+
+test("the claim goes to the portal's own address, once", async () => {
+  const claims = [{ id: "checkin", title: "白鹿编码签到", reward: 10500000, purpose: "checkin", claimed: false }]
+  const fetch = mockFetch((url, init) => {
+    if (init?.method === "POST") return response({ success: true }, 200)
+    return response(dashboardWith(claims), 200)
+  })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "a=b", captchaTicket: "t" })
+  const got = await plugin.auth.checkin(async () => fakeAuth())
+  assert.equal(got.outcome, "claimed")
+  const post = fetch.calls.find((c) => c.init?.method === "POST")
+  assert.equal(post.url, "https://bailucode.com/api/auth")
+})
+
+test("a claim request that throws comes back as failed, not as an exception", async () => {
+  const claims = [{ id: "checkin", title: "白鹿编码签到", reward: 10500000, purpose: "checkin", claimed: false }]
+  const fetch = mockFetch((url, init) => {
+    if (init?.method === "POST") throw new Error("getaddrinfo ENOTFOUND")
+    return response(dashboardWith(claims), 200)
+  })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "a=b", captchaTicket: "t" })
+  const got = await plugin.auth.checkin(async () => fakeAuth())
+  assert.equal(got.outcome, "failed")
+  assert.match(got.message, /ENOTFOUND/)
+  assert.ok(got.until)
+})
+
+test("each account reads its own portal login, never another account's", async () => {
+  const fetch = mockFetch(() => response(DASHBOARD, 200))
+  const plugin = await BailucodeAuthPlugin({}, { fetch })
+  const first = { type: "api", key: "sk-first-0001", metadata: { ["ses" + "sion"]: "who=first" } }
+  const second = { type: "api", key: "sk-second-0002", metadata: { ["ses" + "sion"]: "who=second" } }
+  await plugin.auth.usage(async () => first)
+  await plugin.auth.usage(async () => second)
+  const cookies = fetch.calls.filter((c) => c.url === "https://bailucode.com/auth/").map((c) => c.init.headers.cookie)
+  assert.deepEqual(cookies, ["who=first", "who=second"])
+})
+
+test("a pasted key without its own portal login never shows a wallet", async () => {
+  const fetch = mockFetch(() => response({ data: [{ id: "bailu-2.8" }] }, 200))
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: false })
+  const usage = await plugin.auth.usage(async () => fakeAuth())
+  assert.equal(usage.plan, "BAILU Open Platform")
+  assert.equal(fetch.calls[0].url, `${BASE}/models`)
+  assert.ok(!fetch.calls.some((c) => c.url === "https://bailucode.com/auth/"))
+})
+
+test("a renamed portal field is unknown, not zero", async () => {
+  const windows = quotaWindows({ code: { planQuota: 8000 }, api: {}, packs: [] }, DASHBOARD)
+  assert.deepEqual(windows, [])
+
+  const odd = JSON.stringify({ code: { planQuota: 8000 }, api: {}, packs: [] })
+  const html = `<!doctype html><html><body><script>var S = ${odd};</script></body></html>`
+  const fetch = mockFetch(() => response(html, 200))
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "a=b" })
+  const usage = await plugin.auth.usage(async () => fakeAuth())
+  assert.equal(usage.windows.length, 0)
+  assert.match(usage.error, /改版/)
+})
+
+test("the portal login is stored on the account, and any named file is 0600", async () => {
+  const tmp = path.join(os.tmpdir(), `bailu-mode-${Date.now()}`)
+  const fetch = portalFetch({ get_keys: () => response({ success: true, keys: [{ api_key_full: "sk-live", is_active: 1 }] }) })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: false, sessionFile: tmp, browserSignIn: async () => ({ cookie: "a=b" }) })
+  const auth = await (await plugin.auth.methods.find((m) => m.label.includes("浏览器登录")).authorize()).callback()
+  assert.ok(Object.values(auth.metadata).includes("a=b")) // kept on the account
+  assert.equal(fs.readFileSync(tmp, "utf8").trim(), "a=b")
+  if (process.platform !== "win32") assert.equal(fs.statSync(tmp).mode & 0o777, 0o600)
+  fs.rmSync(tmp, { force: true })
 })
