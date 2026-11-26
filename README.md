@@ -2,17 +2,25 @@
 
 把 **白鹿（BAILU AI）Open Platform** 接进 [magpie](https://github.com/yetone/magpie)：粘贴一枚 API key，白鹿的模型就出现在 magpie 的模型选择器里，Claude Code / Codex / OpenCode 等 agent 都能直接选。
 
+> BAILU AI (白鹿) provider for magpie — one API key, models discovered from `GET /models`, OpenAI Chat Completions / Anthropic Messages / OpenAI Responses faces on the same gateway.
+
 - key 页面：<https://bailucode.com/api_platform/#api-keys>
 - 网关：`https://bailucode.com/openapi/v1`（一个 base，一个 `Authorization: Bearer sk-…`）
 
 ## 安装
 
 ```bash
-# 从本目录安装（本地路径即可，无依赖）
-magpie plugin add C:/Users/Administrator/magpie-plugins/magpie-bailucode
+# 从 GitHub 安装（推荐）
+magpie plugin add github:123panbingsen/magpie-bailucode
 
 # 确认装上了
 magpie plugin list
+```
+
+改代码时直接装本地目录，magpie 会照原样加载：
+
+```bash
+magpie plugin add C:/path/to/magpie-bailucode
 ```
 
 装完后 magpie 的 Providers 里会多出 **BAILU（白鹿）**。
