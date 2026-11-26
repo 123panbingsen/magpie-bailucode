@@ -476,6 +476,31 @@ async function portalCreateKey(cookie, name = "magpie", fetchImpl = fetchImplGlo
   return String(full)
 }
 
+// 门户的「今日可领」：签到 + 两项定向额度。每一项都要 Cap 人机验证的 ticket，
+// 没有 ticket 服务端直接回「请先完成人机验证」，所以这里只在有 ticket（或已经领过）时才动手。
+const CLAIMS = {
+  checkin: { url: "https://bailucode.com/api/auth", action: "claim_daily_checkin", label: "白鹿编码签到" },
+  anthropic: { url: "https://bailucode.com/api/api_keys", action: "claim_anthropic_promo", label: "Anthropic 协议定向" },
+  openclaw: { url: "https://bailucode.com/api/api_keys", action: "claim_openclaw_promo", label: "白鹿 API 总额度补充" },
+}
+
+async function claimOne(cookie, target, ticket, fetchImpl = fetchImplGlobal) {
+  const body = { action: target.action, ...(ticket ? { captcha_ticket: ticket } : {}) }
+  const res = await fetchImpl("https://bailucode.com" + target.url, {
+    method: "POST",
+    headers: { cookie, "user-agent": `magpie-bailucode/${VERSION}`, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TIMEOUT),
+  })
+  const text = await res.text()
+  let data = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = null
+  }
+  return { status: res.status, data }
+}
 // ---- the plugin --------------------------------------------------------------
 
 export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {}) {
@@ -666,6 +691,46 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
       }
       usageCache.set(scope, { at: Date.now(), value })
       return value
+    },
+    // magpie 的签到钩子：只对有 ticket 的可领项动手，其余如实说明。
+    async checkin(getAuth) {
+      const auth = await getAuth()
+      if (auth?.type !== "api" || !auth.key) return { outcome: "ineligible", message: "还没有登录" }
+      const jar = readSession(auth)
+      if (!jar) return { outcome: "ineligible", message: "没有通行证会话：先走一次「浏览器登录」" }
+      let wallet
+      try {
+        wallet = (await portalWallet(jar, fetchImpl)).wallet
+      } catch (error) {
+        return { outcome: "ineligible", message: error?.message || "读不到门户" }
+      }
+      const claims = Array.isArray(wallet?.claims) ? wallet.claims : []
+      if (!claims.length) return { outcome: "failed", message: "门户没有给出今日可领项" }
+      const pending = claims.filter((c) => !c.claimed && CLAIMS[c.id])
+      if (!pending.length) return { outcome: "already", message: "今天三项都已领取" }
+      const ticket = String(options.captchaTicket || process.env.BAILUCODE_CAPTCHA || "").trim()
+      const done = []
+      let amount = 0
+      for (const claim of pending) {
+        const target = CLAIMS[claim.id]
+        const { data } = await claimOne(jar, target, ticket, fetchImpl)
+        if (data?.success || data?.already_claimed) {
+          done.push(`${target.label}${data?.already_claimed ? "已领" : "+" + (claim.reward || 0)}`)
+          amount += Number(claim.reward) || 0
+          continue
+        }
+        if (/人机验证|安全验证|滑块/.test(String(data?.message || ""))) {
+          usageCache.clear()
+          return {
+            outcome: done.length ? "claimed" : "manual",
+            message: `${done.length ? done.join(" · ") + "；" : ""}还差人机验证：打开 ${PORTAL} 点一次「${target.label}」的领取，再在 magpie 里点签到即可`,
+            ...(amount ? { amount } : {}),
+          }
+        }
+        return { outcome: "failed", message: data?.message || `领取失败（HTTP ${data ? "" : "?"}）` }
+      }
+      usageCache.clear()
+      return { outcome: "claimed", message: done.join(" · ") || "已领取", ...(amount ? { amount } : {}) }
     },
   }
 

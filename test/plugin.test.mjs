@@ -365,3 +365,53 @@ test("a portal that refuses to list keys fails the browser route loudly", async 
   const oauth = plugin.auth.methods.find((m) => m.label.includes("浏览器登录"))
   await assert.rejects(async () => (await oauth.authorize()).callback(), /平台协议确认/)
 })
+// ---- 签到（今日可领） -----------------------------------------------------------
+
+function dashboardWith(claims) {
+  const wallet = { ...WALLET, claims }
+  return `<!doctype html><html><body><dl class="wl-kv"><dt>用量重置</dt><dd>12月3日</dd></dl><script>var S = ${JSON.stringify(wallet)};</script></body></html>`
+}
+
+test("checkin reports the three items as already taken without calling the server", async () => {
+  const claims = [
+    { id: "checkin", title: "白鹿编码签到", reward: 10500000, purpose: "checkin", claimed: true },
+    { id: "anthropic", title: "Anthropic 协议定向", reward: 5000000, purpose: "promo_claim", claimed: true },
+    { id: "openclaw", title: "白鹿 API 总额度补充", reward: 5000000, purpose: "promo_claim", claimed: true },
+  ]
+  const fetch = mockFetch(() => response(dashboardWith(claims), 200))
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "a=b" })
+  const got = await plugin.auth.checkin(async () => fakeAuth())
+  assert.equal(got.outcome, "already")
+  assert.equal(fetch.calls.filter((c) => c.init?.method === "POST").length, 0)
+})
+
+test("checkin asks the portal when the only way past is a human check", async () => {
+  const claims = [{ id: "checkin", title: "白鹿编码签到", reward: 10500000, purpose: "checkin", claimed: false }]
+  const fetch = mockFetch((url, init) => {
+    if (init?.method === "POST") return response({ success: false, message: "请先完成人机验证" }, 400)
+    return response(dashboardWith(claims), 200)
+  })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "a=b" })
+  const got = await plugin.auth.checkin(async () => fakeAuth())
+  assert.equal(got.outcome, "manual")
+  assert.match(got.message, /人机验证/)
+  assert.ok(got.message.includes("bailucode.com/auth/"))
+})
+
+test("with a captcha ticket the claim goes through", async () => {
+  const claims = [{ id: "checkin", title: "白鹿编码签到", reward: 10500000, purpose: "checkin", claimed: false }]
+  const fetch = mockFetch((url, init) => {
+    if (init?.method === "POST") {
+      const body = JSON.parse(init.body)
+      assert.equal(body.action, "claim_daily_checkin")
+      assert.equal(body.captcha_ticket, "ticket-123")
+      return response({ success: true }, 200)
+    }
+    return response(dashboardWith(claims), 200)
+  })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "a=b", captchaTicket: "ticket-123" })
+  const got = await plugin.auth.checkin(async () => fakeAuth())
+  assert.equal(got.outcome, "claimed")
+  assert.equal(got.amount, 10500000)
+  assert.match(got.message, /白鹿编码签到/)
+})
