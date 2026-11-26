@@ -86,6 +86,19 @@ magpie plugin options magpie-bailucode '{"protocol":"anthropic"}'
 | API 平台 | `api.usedEff` / `api.quotaEff`，重置日取页面「用量重置」 | `657 / 3.18 亿 Tokens` |
 | 定向额度 | `packs[]`（Anthropic 等） | `剩 500 万 / 共 500 万 Tokens` |
 
+`magpie accounts` 实录（本机，通行证会话在位）：
+
+```json
+{ "agent": "bailucode", "plan": "白鹿通行证", "active": true,
+  "windows": [
+    { "name": "白鹿编码", "used": 0, "remaining": 100, "display": "21,500 Credits", "unit": "credits" },
+    { "name": "API 平台", "used": 0.0002, "remaining": 99.9998,
+      "resetsAt": "2026-12-02T16:00:00Z", "display": "657 / 3.18 亿 Tokens", "unit": "tokens" },
+    { "name": "Anthropic 协议 定向", "used": 0, "remaining": 100,
+      "display": "剩 500 万 / 共 500 万 Tokens", "unit": "tokens" }
+  ] }
+```
+
 会话放一次就行，登录流程里一个点击都不多：
 
 ```bash
