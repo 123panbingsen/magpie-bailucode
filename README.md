@@ -7,6 +7,13 @@
 - key 页面：<https://bailucode.com/api_platform/#api-keys>
 - 网关：`https://bailucode.com/openapi/v1`（一个 base，一个 `Authorization: Bearer sk-…`）
 
+## 装法（两种）
+
+| 路径 | 命令 | 何时可用 |
+| --- | --- | --- |
+| 直接装 GitHub | `magpie plugin add github:123panbingsen/magpie-bailucode` | **现在** |
+| magpie 社区索引 | Plugins 页搜「白鹿」或「bailucode」，或 `magpie plugin add @magpie-community/opencode-bailucode-auth` | 索引来自 `magpie-community/plugins` 的 `main/registry.json`，本包的 [PR #1586](https://github.com/magpie-community/plugins/pull/1586) 合并后才出现 |
+
 ## 安装
 
 ```bash
