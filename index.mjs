@@ -166,30 +166,9 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
         type: "api",
         label: "BAILU API key（bailucode.com/openapi）",
         placeholder: "sk-…",
-        prompts: [
-          {
-            type: "text",
-            key: "baseURL",
-            message: `API 地址（默认 ${BASE}，一般直接回车）`,
-            placeholder: BASE,
-            // magpie's Go side decodes this as a string: undefined when the
-            // value is fine, a message otherwise. Returning `true` fails the
-            // whole login with "cannot unmarshal bool into ... .error of type string".
-            validate: (value) => {
-              const text = typeof value === "string" ? value.trim() : ""
-              if (!text) return undefined
-              if (!/^https?:\/\//i.test(text)) return "地址需要 http(s)://"
-              try {
-                const url = new URL(text)
-                if (url.protocol !== "https:" && url.protocol !== "http:") return "地址需要 http(s)://"
-                if (url.username || url.password || url.search || url.hash) return "地址不要带账号、查询串或片段"
-                return undefined
-              } catch {
-                return "地址格式不对，例如 https://bailucode.com/openapi/v1"
-              }
-            },
-          },
-        ],
+        // 只要 key：地址默认就是官网网关，不再多问一次。
+        // 要换网关（镜像/自建）用插件选项：magpie plugin options magpie-bailucode '{"baseURL":"…"}'
+        prompts: [],
       },
     ],
     // magpie 的卡片：能证明的只有「key 是否被接受」。

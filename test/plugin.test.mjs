@@ -176,21 +176,25 @@ test("chat.headers keeps the honest client UA that Cloudflare lets through", asy
   assert.equal(out2.headers.accept, "text/event-stream")
 })
 
-test("the address prompt validates as magpie's Go side expects: string or nothing", async () => {
+test("sign-in asks for the key and nothing else", async () => {
   const plugin = await BailucodeAuthPlugin({}, {})
-  const [{ prompts }] = plugin.auth.methods
-  const { validate } = prompts[0]
-  assert.equal(validate(""), undefined)
-  assert.equal(validate("   "), undefined)
-  assert.equal(validate("https://bailucode.com/openapi/v1"), undefined)
-  assert.equal(validate("http://bailucode.com/openapi/v1"), undefined)
-  // a bool here fails the login with "cannot unmarshal bool into ... .error of type string"
-  assert.equal(typeof validate("bailucode.com"), "string")
-  assert.equal(typeof validate("ftp://x"), "string")
-  assert.equal(typeof validate("https://u:p@x/?q=1"), "string")
-  for (const bad of ["bailucode.com", "ftp://x", "https://u:p@x/?q=1", "not a url"]) {
-    assert.notEqual(typeof validate(bad), "boolean")
-  }
+  const methods = plugin.auth.methods
+  assert.equal(methods.length, 1)
+  assert.equal(methods[0].type, "api")
+  assert.equal(methods[0].placeholder, "sk-…")
+  // no extra prompt to click through: the gateway address is fixed
+  assert.deepEqual(methods[0].prompts ?? [], [])
+  assert.match(methods[0].label, /bailucode\.com/)
+})
+
+test("a different gateway comes from options or a stored address, never a prompt", async () => {
+  const viaOptions = await BailucodeAuthPlugin({}, { baseURL: "https://mirror.example.com/openapi" })
+  const hook = await viaOptions.auth.loader(async () => fakeAuth())
+  assert.equal(hook.baseURL, "https://mirror.example.com/openapi/v1")
+
+  const stored = await BailucodeAuthPlugin({}, {})
+  const kept = await stored.auth.loader(async () => fakeAuth({ baseURL: "https://bailucode.com/openapi" }))
+  assert.equal(kept.baseURL, BASE)
 })
 
 test("usage is null without a key", async () => {
