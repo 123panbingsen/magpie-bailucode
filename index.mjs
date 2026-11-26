@@ -23,6 +23,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { spawn } from "node:child_process"
 
 const PROVIDER = "bailucode"
 const PROVIDER_NAME = "BAILU（白鹿）"
@@ -237,6 +238,244 @@ function quotaWindows(S, html, now = new Date()) {
   return windows
 }
 
+// ---- signing in through a browser ----------------------------------------------
+
+// Only bailucode.com's own cookies; the string is what the portal expects.
+const cookieHeader = (cookies) =>
+  (Array.isArray(cookies) ? cookies : [])
+    .filter((c) => c && c.name && c.value && String(c.domain || "").replace(/^\./, "").endsWith("bailucode.com"))
+    .map((c) => `${c.name}=${c.value}`)
+    .join("; ")
+
+function browserExecutables() {
+  const roots = [process.env["PROGRAMFILES"], process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean)
+  const found = []
+  for (const root of roots) {
+    found.push(path.join(root, "Google", "Chrome", "Application", "chrome.exe"))
+    found.push(path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"))
+  }
+  found.push(path.join("/usr/bin", "google-chrome"), path.join("/usr/bin", "chromium"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+  return found.filter((file) => {
+    try {
+      return fs.existsSync(file)
+    } catch {
+      return false
+    }
+  })
+}
+
+// Chrome writes "<port>\n<websocket path>" into the profile once it listens.
+const parseDevToolsPort = (text) => {
+  const port = Number(String(text || "").split(/\r?\n/)[0])
+  return Number.isInteger(port) && port > 0 ? port : null
+}
+
+async function cdpSession(port, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs
+  let target = null
+  while (Date.now() < deadline) {
+    try {
+      const list = await (await fetchImplGlobal(`http://127.0.0.1:${port}/json/list`)).json()
+      target = list.find((t) => t.type === "page" && t.webSocketDebuggerUrl)
+      if (target) break
+    } catch {}
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  if (!target) throw new Error("浏览器没有就绪（找不到调试目标）")
+
+  const ws = new WebSocket(target.webSocketDebuggerUrl)
+  let id = 0
+  const pending = new Map()
+  ws.addEventListener("message", (event) => {
+    const msg = JSON.parse(event.data)
+    if (msg.id && pending.has(msg.id)) {
+      pending.get(msg.id)(msg)
+      pending.delete(msg.id)
+    }
+  })
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("open", resolve)
+    ws.addEventListener("error", () => reject(new Error("连不上浏览器的调试端口")))
+  })
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const myId = ++id
+      pending.set(myId, (msg) => (msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result)))
+      ws.send(JSON.stringify({ id: myId, method, params }))
+    })
+  return {
+    send,
+    close: () => {
+      try {
+        ws.close()
+      } catch {}
+    },
+  }
+}
+
+const fetchImplGlobal = (...args) => globalThis.fetch(...args)
+
+// The signed-in dashboard page, read-only. `var S = {...}` is its wallet.
+async function portalWallet(cookie, fetchImpl = fetchImplGlobal) {
+  const res = await fetchImpl(PORTAL, {
+    method: "GET",
+    headers: {
+      cookie,
+      "user-agent": `magpie-bailucode/${VERSION}`,
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "zh-CN,zh;q=0.9",
+    },
+    redirect: "manual",
+    signal: AbortSignal.timeout(TIMEOUT),
+  })
+  if (res.status >= 300 && res.status < 400) {
+    const error = new Error("白鹿通行证会话已过期")
+    error.expired = true
+    throw error
+  }
+  if (!res.ok) {
+    const error = new Error(res.status === 403 ? CLOUDFLARE_HINT : `门户返回 HTTP ${res.status}`)
+    if (res.status === 403) error.cloudflare = true
+    throw error
+  }
+  const html = await res.text()
+  const wallet = extractJson(html, "var S = ")
+  if (!wallet) {
+    const error = new Error("门户页面里没有额度数据（页面可能改版，或会话只读到了登录页）")
+    error.expired = /id="email"|发送验证码/.test(html)
+    throw error
+  }
+  const email = typeof wallet.seed === "string" && wallet.seed.includes("@") ? wallet.seed : wallet?.pw?.email
+  return { wallet, html, email }
+}
+
+// Opens the portal in a throwaway Chrome profile, waits for the person to
+// finish the email sign-in there, and hands back the session cookie the
+// browser then holds. Nothing is typed by the plugin.
+async function browserSignIn({ log, timeoutMs = 5 * 60_000, profileDir, url = `${PORTAL}login?return_url=%2Fauth%2F` }) {
+  const executables = browserExecutables()
+  if (!executables.length) throw new Error("找不到 Chrome 或 Edge")
+  const dir = profileDir ?? path.join(os.tmpdir(), "magpie-bailucode-browser")
+  fs.mkdirSync(dir, { recursive: true })
+  for (const file of ["DevToolsActivePort", "SingletonLock"]) {
+    try {
+      fs.rmSync(path.join(dir, file), { force: true })
+    } catch {}
+  }
+
+  let child = null
+  let cdp = null
+  const closeBrowser = async () => {
+    try {
+      cdp?.close()
+    } catch {}
+    try {
+      child?.kill()
+    } catch {}
+    await new Promise((r) => setTimeout(r, 300))
+  }
+
+  try {
+    child = spawn(executables[0], [`--user-data-dir=${dir}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--disable-features=Translate", "--start-maximized", "--new-window", url], {
+      stdio: "ignore",
+      detached: false,
+    })
+    child.on("error", (error) => log(`浏览器启动失败：${error.message}`))
+
+    const portFile = path.join(dir, "DevToolsActivePort")
+    const deadline = Date.now() + 30_000
+    let port = null
+    while (Date.now() < deadline && !port) {
+      try {
+        port = parseDevToolsPort(fs.readFileSync(portFile, "utf8"))
+      } catch {}
+      if (!port) await new Promise((r) => setTimeout(r, 300))
+    }
+    if (!port) throw new Error("浏览器没有给出调试端口")
+
+    cdp = await cdpSession(port)
+    await cdp.send("Network.enable")
+
+    const until = Date.now() + timeoutMs
+    let lastNote = ""
+    while (Date.now() < until) {
+      const { cookies } = await cdp.send("Network.getAllCookies")
+      const header = cookieHeader(cookies)
+      if (header) {
+        const reachable = await portalWallet(header).catch((error) => ({ error }))
+        if (reachable && !reachable.error) {
+          log("浏览器登录完成，已拿到通行证会话")
+          return { cookie: header, wallet: reachable.wallet, html: reachable.html }
+        }
+        const note = reachable?.error?.cloudflare ? "浏览器还在过 Cloudflare 验证" : reachable?.error?.message || ""
+        if (note && note !== lastNote) {
+          lastNote = note
+          log(`还在等登录完成：${note}`)
+        }
+      }
+      const waited = Math.round((timeoutMs - (until - Date.now())) / 1000)
+      if (waited > 0 && waited % 20 < 2) {
+        const here = await cdp.send("Runtime.evaluate", { expression: "location.href", returnByValue: true }).catch(() => null)
+        log(`等了 ${waited}s，浏览器停在 ${here?.result?.value || "?"}`)
+      }
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+    throw new Error("等待登录超时（5 分钟）")
+  } finally {
+    await closeBrowser()
+  }
+}
+
+// The portal's own key API: full keys for the signed-in account, and creating
+// one when the account has none.
+async function portalKeys(cookie, fetchImpl = fetchImplGlobal) {
+  const res = await fetchImpl("https://bailucode.com/api/api_keys", {
+    method: "POST",
+    headers: { cookie, "user-agent": `magpie-bailucode/${VERSION}`, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ action: "get_keys" }),
+    signal: AbortSignal.timeout(TIMEOUT),
+  })
+  const text = await res.text()
+  let body = null
+  try {
+    body = text ? JSON.parse(text) : null
+  } catch {
+    body = null
+  }
+  if (!res.ok || !body?.success) {
+    const error = new Error(body?.message || `读取密钥失败（HTTP ${res.status}）`)
+    error.status = res.status
+    return { error }
+  }
+  return { keys: Array.isArray(body.keys) ? body.keys : [] }
+}
+
+const workingKey = (keys) => {
+  const list = Array.isArray(keys) ? keys : []
+  const usable = list.filter((k) => k && typeof k.api_key_full === "string" && k.api_key_full.startsWith("sk-"))
+  return usable.find((k) => k.is_active === 1 || k.is_active === true) ?? usable[0] ?? null
+}
+
+async function portalCreateKey(cookie, name = "magpie", fetchImpl = fetchImplGlobal) {
+  const res = await fetchImpl("https://bailucode.com/api/api_keys", {
+    method: "POST",
+    headers: { cookie, "user-agent": `magpie-bailucode/${VERSION}`, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ action: "create_key", key_name: name }),
+    signal: AbortSignal.timeout(TIMEOUT),
+  })
+  const text = await res.text()
+  let body = null
+  try {
+    body = text ? JSON.parse(text) : null
+  } catch {
+    body = null
+  }
+  if (!res.ok || !body?.success) throw new Error(body?.message || `创建密钥失败（HTTP ${res.status}）`)
+  const full = body?.key?.api_key_full ?? body?.api_key_full ?? body?.keys?.[0]?.api_key_full
+  if (!full) throw new Error("创建成功但没有拿到密钥原文")
+  return String(full)
+}
+
 // ---- the plugin --------------------------------------------------------------
 
 export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {}) {
@@ -246,6 +485,7 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
     } catch {}
   }
   const fetchImpl = typeof options.fetch === "function" ? options.fetch : (...args) => globalThis.fetch(...args)
+  const signInWithBrowser = typeof options.browserSignIn === "function" ? options.browserSignIn : browserSignIn
   const usageCache = new Map()
 
   const metaOf = (auth) => auth?.metadata ?? {}
@@ -282,9 +522,11 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
 
   // A 白鹿通行证 cookie, kept out of the sign-in flow: the env var, the plugin
   // option, or a file. Nothing here is required for the provider to work.
-  function readSession() {
+  function readSession(auth) {
     if (options.session === false) return null
     if (typeof options.session === "string" && options.session.trim()) return options.session.trim()
+    const kept = auth?.metadata?.session
+    if (typeof kept === "string" && kept.trim()) return kept.trim()
     if (typeof process.env.BAILUCODE_SESSION === "string" && process.env.BAILUCODE_SESSION.trim()) {
       return process.env.BAILUCODE_SESSION.trim()
     }
@@ -299,37 +541,22 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
   }
 
   // The dashboard page, not an API: reads only, and the cookie never leaves.
-  async function portalDashboard(session) {
-    const res = await fetchImpl(PORTAL, {
-      method: "GET",
-      headers: {
-        cookie: session,
-        "user-agent": `magpie-bailucode/${VERSION}`,
-        accept: "text/html,application/xhtml+xml",
-        "accept-language": "zh-CN,zh;q=0.9",
-      },
-      redirect: "manual",
-      signal: AbortSignal.timeout(TIMEOUT),
-    })
-    const html = await res.text()
-    if (res.status >= 300 && res.status < 400) {
-      const error = new Error("白鹿通行证会话已过期")
-      error.expired = true
-      throw error
+  async function portalDashboard(k) {
+    return portalWallet(k, fetchImpl)
+  }
+
+  // Persist the cookie the browser sign-in produced, so the card keeps
+  // showing the wallet on later runs without another login.
+  function saveSession(cookie) {
+    const file = typeof options.sessionFile === "string" ? options.sessionFile : SESSION_CANDIDATES[0]
+    if (!file) return
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, cookie + "\n")
+      log(`通行证会话已写入 ${file}`)
+    } catch (error) {
+      log(`会话没能落盘：${error?.message || error}`)
     }
-    if (!res.ok) {
-      const error = new Error(res.status === 403 ? CLOUDFLARE_HINT : `门户返回 HTTP ${res.status}`)
-      if (res.status === 403) error.cloudflare = true
-      throw error
-    }
-    const wallet = extractJson(html, "var S = ")
-    if (!wallet) {
-      const error = new Error("门户页面里没有额度数据（页面可能改版，或会话只读到了登录页）")
-      error.expired = /id="email"|发送验证码/.test(html)
-      throw error
-    }
-    const email = typeof wallet.seed === "string" && wallet.seed.includes("@") ? wallet.seed : wallet?.pw?.email
-    return { wallet, html, email }
   }
 
   const authHook = {
@@ -348,6 +575,41 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
         // 要换网关（镜像/自建）用插件选项：magpie plugin options magpie-bailucode '{"baseURL":"…"}'
         prompts: [],
       },
+      {
+        type: "oauth",
+        label: "浏览器登录白鹿通行证（自动取 key + 显示额度）",
+        // 打开一个独立的 Chrome 窗口：你在里面收邮箱验证码登录，插件等页面
+        // 自己变成已登录状态，再从这里抓 cookie、取门户里已有的 key，没有就建一枚。
+        authorize: async () => {
+          // 已经有一份能用的通行证会话时（%LOCALAPPDATA%\magpie-bailucode\session.txt），
+          // 直接拿它换 key：不开浏览器、不让你再登录一次。
+          let jar = readSession()
+          if (jar) {
+            const live = await portalWallet(jar, fetchImpl).catch(() => null)
+            if (!live) {
+              log('已存的通行证会话失效，改为打开浏览器登录')
+              jar = null
+            } else {
+              log('复用已存的通行证会话，跳过浏览器')
+            }
+          }
+          if (!jar) {
+            const opened = await signInWithBrowser({ log, timeoutMs: Number(options.loginTimeoutMs) || 5 * 60_000 })
+            jar = opened.cookie
+          }
+          const found = await portalKeys(jar, fetchImpl)
+          if (found.error) throw found.error
+          let key = workingKey(found.keys)?.api_key_full
+          if (key) {
+            log("门户里已有可用 key，直接复用")
+          } else {
+            key = await portalCreateKey(jar, "magpie", fetchImpl)
+            log("门户里没有可用 key，已新建一枚 magpie key")
+          }
+          saveSession(jar)
+          return { type: "api", key, metadata: { browser: "chrome" } }
+        },
+      },
     ],
     // magpie 的卡片：有通行证会话就报额度，没有就只报 key 是否被网关接受。
     async usage(getAuth) {
@@ -355,7 +617,7 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
       if (auth?.type !== "api" || !auth.key) return null
       const base = baseOf(auth)
       const key = String(auth.key)
-      const session = readSession()
+      const session = readSession(auth)
       const scope = `${base}|${key.slice(-8)}|${session ? "session" : "key"}`
       const hit = usageCache.get(scope)
       if (hit && Date.now() - hit.at < USAGE_TTL) return hit.value
@@ -474,5 +736,8 @@ export const _internal = {
   quotaWindows,
   resetsAtFrom,
   fmtCN,
+  cookieHeader,
+  workingKey,
+  parseDevToolsPort,
   SESSION_CANDIDATES,
 }

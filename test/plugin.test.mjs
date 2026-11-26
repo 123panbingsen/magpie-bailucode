@@ -1,5 +1,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 import { BailucodeAuthPlugin, _internal } from "../index.mjs"
 
@@ -179,12 +182,15 @@ test("chat.headers keeps the honest client UA that Cloudflare lets through", asy
 test("sign-in asks for the key and nothing else", async () => {
   const plugin = await BailucodeAuthPlugin({}, {})
   const methods = plugin.auth.methods
-  assert.equal(methods.length, 1)
-  assert.equal(methods[0].type, "api")
-  assert.equal(methods[0].placeholder, "sk-…")
+  const api = methods.find((m) => m.type === "api")
+  assert.ok(api)
+  assert.equal(api.placeholder, "sk-…")
   // no extra prompt to click through: the gateway address is fixed
-  assert.deepEqual(methods[0].prompts ?? [], [])
-  assert.match(methods[0].label, /bailucode\.com/)
+  assert.deepEqual(api.prompts ?? [], [])
+  assert.match(api.label, /bailucode\.com/)
+  // the browser route is its own choice, not a prompt on the key one
+  const oauth = methods.find((m) => m.type === "oauth")
+  assert.ok(oauth && typeof oauth.authorize === "function")
 })
 
 test("a different gateway comes from options or a stored address, never a prompt", async () => {
@@ -271,4 +277,89 @@ test("without a session the card falls back to the key check, never the portal",
   const usage = await plugin.auth.usage(async () => fakeAuth())
   assert.equal(usage.plan, "BAILU Open Platform")
   assert.equal(fetch.calls[0].url, `${BASE}/models`)
+})
+
+// ---- 浏览器登录 -----------------------------------------------------------------
+
+test("only bailucode cookies become the cookie header", () => {
+  const header = _internal.cookieHeader([
+    { name: "a", value: "1", domain: ".bailucode.com" },
+    { name: "b", value: "2", domain: "bailucode.com" },
+    { name: "c", value: "3", domain: ".example.com" },
+    { name: "d", value: "", domain: ".bailucode.com" },
+  ])
+  assert.equal(header, "a=1; b=2")
+})
+
+test("DevToolsActivePort's first line is the port", () => {
+  assert.equal(_internal.parseDevToolsPort("9222\n/devtools/browser/abc"), 9222)
+  assert.equal(_internal.parseDevToolsPort("0\n"), null)
+  assert.equal(_internal.parseDevToolsPort(""), null)
+})
+
+test("the working key is a full sk- key, active one first", () => {
+  const keys = [
+    { api_key_full: "sk-old", is_active: 0 },
+    { api_key_full: "sk-live", is_active: 1 },
+  ]
+  assert.equal(_internal.workingKey(keys).api_key_full, "sk-live")
+  assert.equal(_internal.workingKey([{ api_key_full: "sk-only" }]).api_key_full, "sk-only")
+  assert.equal(_internal.workingKey([]), null)
+  assert.equal(_internal.workingKey([{ api_key_masked: "sk-…" }]), null)
+})
+
+function portalFetch(handlers) {
+  return mockFetch((url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : {}
+    const handler = handlers[body.action]
+    if (!handler) return response({ success: false, message: "无效的操作" }, 400)
+    return handler(url, body)
+  })
+}
+
+test("the browser route reuses a key the portal already lists", async () => {
+  const tmp = path.join(os.tmpdir(), `bailu-session-test-${Date.now()}`)
+  const fetch = portalFetch({
+    get_keys: () => response({ success: true, keys: [{ id: 7, is_active: 1, api_key_full: "sk-existing-1234", key_name: "we" }] }),
+  })
+  const plugin = await BailucodeAuthPlugin(
+    {},
+    { fetch, session: false, sessionFile: tmp, browserSignIn: async () => ({ cookie: "a=b; c=d" }) }
+  )
+  const oauth = plugin.auth.methods.find((m) => m.type === "oauth")
+  const auth = await oauth.authorize()
+  assert.equal(auth.type, "api")
+  assert.equal(auth.key, "sk-existing-1234")
+  assert.equal(fs.readFileSync(tmp, "utf8").trim(), "a=b; c=d")
+  assert.equal(fetch.calls[0].url, "https://bailucode.com/api/api_keys")
+  assert.equal(fetch.calls[0].init.headers.cookie, "a=b; c=d")
+  fs.rmSync(tmp, { force: true })
+})
+
+test("with no key in the portal the browser route creates one", async () => {
+  const tmp = path.join(os.tmpdir(), `bailu-session-test-${Date.now()}-2`)
+  const fetch = portalFetch({
+    get_keys: () => response({ success: true, keys: [] }),
+    create_key: (url, body) =>
+      response({ success: true, key: { api_key_full: "sk-new-9999", key_name: body.key_name } }),
+  })
+  const plugin = await BailucodeAuthPlugin(
+    {},
+    { fetch, session: false, sessionFile: tmp, browserSignIn: async () => ({ cookie: "a=b" }) }
+  )
+  const oauth = plugin.auth.methods.find((m) => m.type === "oauth")
+  const auth = await oauth.authorize()
+  assert.equal(auth.key, "sk-new-9999")
+  const created = fetch.calls.find((c) => JSON.parse(c.init.body).action === "create_key")
+  assert.equal(JSON.parse(created.init.body).key_name, "magpie")
+  fs.rmSync(tmp, { force: true })
+})
+
+test("a portal that refuses to list keys fails the browser route loudly", async () => {
+  const fetch = portalFetch({
+    get_keys: () => response({ success: false, message: "请先完成平台协议确认" }, 400),
+  })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: false, browserSignIn: async () => ({ cookie: "a=b" }) })
+  const oauth = plugin.auth.methods.find((m) => m.type === "oauth")
+  await assert.rejects(() => oauth.authorize(), /平台协议确认/)
 })

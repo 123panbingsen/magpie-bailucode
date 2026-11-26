@@ -1,7 +1,7 @@
 {
   "name": "magpie-bailucode",
-  "version": "0.2.0",
-  "description": "BAILU AI (bailucode.com) as a magpie provider: one API key, OpenAI Chat / Anthropic Messages / Responses faces, models discovered from the key, and the 白鹿通行证 quota read from the portal with a session you keep on disk.",
+  "version": "0.3.0",
+  "description": "BAILU AI (bailucode.com) for magpie: one API key, or a browser sign-in that fetches the key from the portal for you; models discovered from the key, and the 白鹿通行证 quota (credits, tokens, per-protocol packs) on the card.",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
