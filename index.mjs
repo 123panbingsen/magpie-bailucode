@@ -576,39 +576,44 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
         prompts: [],
       },
       {
-        type: "api",
+        type: "oauth",
         label: "浏览器登录白鹿通行证（自动取 key + 显示额度）",
-        // 打开一个独立的 Chrome 窗口：你在里面收邮箱验证码登录，插件等页面
-        // 自己变成已登录状态，再从这里抓 cookie、取门户里已有的 key，没有就建一枚。
-        authorize: async () => {
-          // 已经有一份能用的通行证会话时（%LOCALAPPDATA%\magpie-bailucode\session.txt），
-          // 直接拿它换 key：不开浏览器、不让你再登录一次。
-          let jar = readSession()
-          if (jar) {
-            const live = await portalWallet(jar, fetchImpl).catch(() => null)
-            if (!live) {
-              log('已存的通行证会话失效，改为打开浏览器登录')
-              jar = null
-            } else {
-              log('复用已存的通行证会话，跳过浏览器')
+        // magpie 的 oauth 约定：authorize 先交回一个会话（url/instructions/callback），
+        // 真正的等待与取 key 都在 callback 里完成，最后答 { type: "success", key }。
+        authorize: async () => ({
+          url: `${PORTAL}login?return_url=%2Fauth%2F`,
+          instructions: "在打开的浏览器里用邮箱验证码登录，插件会自己接住并取回你的 API key",
+          method: "auto",
+          opened: true,
+          callback: async () => {
+            // 已有一份能用的通行证会话时，不开浏览器：直接拿它换 key。
+            let jar = readSession()
+            if (jar) {
+              const live = await portalWallet(jar, fetchImpl).catch(() => null)
+              if (live) {
+                log("复用已存的通行证会话，跳过浏览器")
+              } else {
+                log("已存的通行证会话失效，改为打开浏览器登录")
+                jar = null
+              }
             }
-          }
-          if (!jar) {
-            const opened = await signInWithBrowser({ log, timeoutMs: Number(options.loginTimeoutMs) || 5 * 60_000 })
-            jar = opened.cookie
-          }
-          const found = await portalKeys(jar, fetchImpl)
-          if (found.error) throw found.error
-          let key = workingKey(found.keys)?.api_key_full
-          if (key) {
-            log("门户里已有可用 key，直接复用")
-          } else {
-            key = await portalCreateKey(jar, "magpie", fetchImpl)
-            log("门户里没有可用 key，已新建一枚 magpie key")
-          }
-          saveSession(jar)
-          return { type: "success", key, metadata: { browser: "chrome" } }
-        },
+            if (!jar) {
+              const opened = await signInWithBrowser({ log, timeoutMs: Number(options.loginTimeoutMs) || 5 * 60_000 })
+              jar = opened.cookie
+            }
+            const found = await portalKeys(jar, fetchImpl)
+            if (found.error) throw found.error
+            let key = workingKey(found.keys)?.api_key_full
+            if (key) {
+              log("门户里已有可用 key，直接复用")
+            } else {
+              key = await portalCreateKey(jar, "magpie", fetchImpl)
+              log("门户里没有可用 key，已新建一枚 magpie key")
+            }
+            saveSession(jar)
+            return { type: "success", key, metadata: { browser: "chrome" } }
+          },
+        }),
       },
     ],
     // magpie 的卡片：有通行证会话就报额度，没有就只报 key 是否被网关接受。

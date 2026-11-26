@@ -327,7 +327,9 @@ test("the browser route reuses a key the portal already lists", async () => {
     { fetch, session: false, sessionFile: tmp, browserSignIn: async () => ({ cookie: "a=b; c=d" }) }
   )
   const oauth = plugin.auth.methods.find((m) => m.label.includes("浏览器登录"))
-  const auth = await oauth.authorize()
+  const session = await oauth.authorize()
+  assert.ok(session && typeof session.callback === "function")
+  const auth = await session.callback()
   assert.equal(auth.type, "success")
   assert.equal(auth.key, "sk-existing-1234")
   assert.equal(fs.readFileSync(tmp, "utf8").trim(), "a=b; c=d")
@@ -348,7 +350,7 @@ test("with no key in the portal the browser route creates one", async () => {
     { fetch, session: false, sessionFile: tmp, browserSignIn: async () => ({ cookie: "a=b" }) }
   )
   const oauth = plugin.auth.methods.find((m) => m.label.includes("浏览器登录"))
-  const auth = await oauth.authorize()
+  const auth = await (await oauth.authorize()).callback()
   assert.equal(auth.key, "sk-new-9999")
   const created = fetch.calls.find((c) => JSON.parse(c.init.body).action === "create_key")
   assert.equal(JSON.parse(created.init.body).key_name, "magpie")
@@ -361,5 +363,5 @@ test("a portal that refuses to list keys fails the browser route loudly", async 
   })
   const plugin = await BailucodeAuthPlugin({}, { fetch, session: false, browserSignIn: async () => ({ cookie: "a=b" }) })
   const oauth = plugin.auth.methods.find((m) => m.label.includes("浏览器登录"))
-  await assert.rejects(() => oauth.authorize(), /平台协议确认/)
+  await assert.rejects(async () => (await oauth.authorize()).callback(), /平台协议确认/)
 })
