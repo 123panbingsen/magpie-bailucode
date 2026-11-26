@@ -576,7 +576,7 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
         prompts: [],
       },
       {
-        type: "oauth",
+        type: "api",
         label: "浏览器登录白鹿通行证（自动取 key + 显示额度）",
         // 打开一个独立的 Chrome 窗口：你在里面收邮箱验证码登录，插件等页面
         // 自己变成已登录状态，再从这里抓 cookie、取门户里已有的 key，没有就建一枚。
@@ -607,7 +607,7 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
             log("门户里没有可用 key，已新建一枚 magpie key")
           }
           saveSession(jar)
-          return { type: "api", key, metadata: { browser: "chrome" } }
+          return { type: "success", key, metadata: { browser: "chrome" } }
         },
       },
     ],

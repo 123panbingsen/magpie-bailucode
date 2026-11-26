@@ -189,7 +189,7 @@ test("sign-in asks for the key and nothing else", async () => {
   assert.deepEqual(api.prompts ?? [], [])
   assert.match(api.label, /bailucode\.com/)
   // the browser route is its own choice, not a prompt on the key one
-  const oauth = methods.find((m) => m.type === "oauth")
+  const oauth = methods.find((m) => m.label.includes("浏览器登录"))
   assert.ok(oauth && typeof oauth.authorize === "function")
 })
 
@@ -326,9 +326,9 @@ test("the browser route reuses a key the portal already lists", async () => {
     {},
     { fetch, session: false, sessionFile: tmp, browserSignIn: async () => ({ cookie: "a=b; c=d" }) }
   )
-  const oauth = plugin.auth.methods.find((m) => m.type === "oauth")
+  const oauth = plugin.auth.methods.find((m) => m.label.includes("浏览器登录"))
   const auth = await oauth.authorize()
-  assert.equal(auth.type, "api")
+  assert.equal(auth.type, "success")
   assert.equal(auth.key, "sk-existing-1234")
   assert.equal(fs.readFileSync(tmp, "utf8").trim(), "a=b; c=d")
   assert.equal(fetch.calls[0].url, "https://bailucode.com/api/api_keys")
@@ -347,7 +347,7 @@ test("with no key in the portal the browser route creates one", async () => {
     {},
     { fetch, session: false, sessionFile: tmp, browserSignIn: async () => ({ cookie: "a=b" }) }
   )
-  const oauth = plugin.auth.methods.find((m) => m.type === "oauth")
+  const oauth = plugin.auth.methods.find((m) => m.label.includes("浏览器登录"))
   const auth = await oauth.authorize()
   assert.equal(auth.key, "sk-new-9999")
   const created = fetch.calls.find((c) => JSON.parse(c.init.body).action === "create_key")
@@ -360,6 +360,6 @@ test("a portal that refuses to list keys fails the browser route loudly", async 
     get_keys: () => response({ success: false, message: "请先完成平台协议确认" }, 400),
   })
   const plugin = await BailucodeAuthPlugin({}, { fetch, session: false, browserSignIn: async () => ({ cookie: "a=b" }) })
-  const oauth = plugin.auth.methods.find((m) => m.type === "oauth")
+  const oauth = plugin.auth.methods.find((m) => m.label.includes("浏览器登录"))
   await assert.rejects(() => oauth.authorize(), /平台协议确认/)
 })
