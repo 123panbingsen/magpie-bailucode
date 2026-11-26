@@ -14,14 +14,29 @@
 //   GET  /openapi/v1/models             the key's model list
 //
 // There is no per-key quota route on the gateway (every /usage, /billing,
-// /key path answers 404), so this plugin reports what it can prove: whether
-// the key is accepted, and how many models it can see.
+// /key path answers 404 — the model faces are the whole surface). The quota
+// the dashboard shows is account-scoped and lives behind the 白鹿通行证 session
+// at https://bailucode.com/auth/, where the page carries it as `var S = {...}`.
+// This plugin reads that page with a session you keep on disk, and reports the
+// key's state when it has none.
+
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 const PROVIDER = "bailucode"
 const PROVIDER_NAME = "BAILU（白鹿）"
 const BASE = "https://bailucode.com/openapi/v1"
 const KEY_PAGE = "https://bailucode.com/api_platform/#api-keys"
-const VERSION = "0.1.0"
+const PORTAL = "https://bailucode.com/auth/"
+const VERSION = "0.2.0"
+
+// Where a 白鹿通行证 cookie may be kept. First one found wins.
+const SESSION_CANDIDATES = [
+  process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "magpie-bailucode", "session.txt") : null,
+  path.join(os.homedir(), ".config", "magpie-bailucode", "session"),
+  path.join(os.homedir(), ".magpie-bailucode", "session"),
+].filter(Boolean)
 
 // The SDK each protocol face is spoken with, as magpie names packages.
 const PROTOCOLS = {
@@ -111,6 +126,117 @@ function authError(status, body) {
   return error
 }
 
+// ---- 白鹿通行证 quota (portal) --------------------------------------------------
+
+// The portal embeds its wallet in the dashboard as `var S = {...}`. Find the
+// object that follows the marker and take it whole: it is plain JSON, so a
+// balanced-brace scan that respects strings is enough.
+function extractJson(text, marker) {
+  const at = typeof text === "string" ? text.indexOf(marker) : -1
+  if (at < 0) return null
+  const start = text.indexOf("{", at + marker.length - 1)
+  if (start < 0) return null
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === "\\") escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1))
+        } catch {
+          return null
+        }
+      }
+    }
+  }
+  return null
+}
+
+const fmtNum = (value) => (Number(value) || 0).toLocaleString("en-US")
+const fmtCN = (value) => {
+  const n = Number(value) || 0
+  // the portal truncates: 318,500,000 reads "3.18 亿", not "3.19"
+  if (n >= 1e8) return `${(Math.floor(n / 1e6) / 100).toFixed(2).replace(/\.?0+$/, "")} 亿`
+  if (n >= 1e4) return `${(Math.floor(n / 1e3) / 10).toFixed(1).replace(/\.0$/, "")} 万`
+  return fmtNum(n)
+}
+
+// "12月3日" on the dashboard is the API quota's reset day.
+function resetsAtFrom(html, now = new Date()) {
+  const match = typeof html === "string" ? html.match(/用量重置<\/dt>\s*<dd[^>]*>\s*(\d{1,2})月(\d{1,2})日/) : null
+  if (!match) return undefined
+  const month = Number(match[1])
+  const day = Number(match[2])
+  const at = new Date(now.getFullYear(), month - 1, day, 0, 0, 0, 0)
+  if (at.getTime() < now.getTime() - 24 * 3600 * 1000) at.setFullYear(at.getFullYear() + 1)
+  return at.toISOString()
+}
+
+const PACK_LABELS = { anthropic: "Anthropic 协议 定向" }
+
+// windows, as magpie draws them: used is a percentage, display is the line.
+function quotaWindows(S, html, now = new Date()) {
+  const windows = []
+  const code = S?.code ?? {}
+  const api = S?.api ?? {}
+
+  const planRemain = Number(code.planRemain) || 0
+  const planQuota = Number(code.planQuota) || 0
+  const addonCredits = (Number(code.addonTokens) || 0) / 1000 // 1,000 tokens = 1 credit
+  const creditsLeft = planRemain + addonCredits
+  if (creditsLeft > 0 || planQuota > 0) {
+    windows.push({
+      name: "白鹿编码",
+      used: planQuota > 0 ? Math.max(0, Math.min(100, ((planQuota - planRemain) / planQuota) * 100)) : 0,
+      amount: creditsLeft,
+      limit: planQuota + addonCredits,
+      display: `${fmtNum(creditsLeft)} Credits`,
+      unit: "credits",
+    })
+  }
+
+  const usedEff = Number(api.usedEff ?? api.used) || 0
+  const quotaEff = Number(api.quotaEff ?? api.quota) || 0
+  if (quotaEff > 0) {
+    windows.push({
+      name: "API 平台",
+      used: Math.max(0, Math.min(100, (usedEff / quotaEff) * 100)),
+      amount: usedEff,
+      limit: quotaEff,
+      display: `${fmtNum(usedEff)} / ${fmtCN(quotaEff)} Tokens`,
+      unit: "tokens",
+      ...(resetsAtFrom(html, now) ? { resetsAt: resetsAtFrom(html, now) } : {}),
+    })
+  }
+
+  for (const pack of Array.isArray(S?.packs) ? S.packs : []) {
+    const total = Number(pack?.q) || 0
+    if (total <= 0) continue
+    const used = Number(pack?.u) || 0
+    windows.push({
+      name: PACK_LABELS[pack?.id] ?? `${pack?.id} 定向`,
+      used: Math.max(0, Math.min(100, (used / total) * 100)),
+      amount: used,
+      limit: total,
+      display: `剩 ${fmtCN(Math.max(0, total - used))} / 共 ${fmtCN(total)} Tokens`,
+      unit: "tokens",
+      aside: true,
+    })
+  }
+  return windows
+}
+
 // ---- the plugin --------------------------------------------------------------
 
 export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {}) {
@@ -154,6 +280,58 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
     return modelIds(body)
   }
 
+  // A 白鹿通行证 cookie, kept out of the sign-in flow: the env var, the plugin
+  // option, or a file. Nothing here is required for the provider to work.
+  function readSession() {
+    if (options.session === false) return null
+    if (typeof options.session === "string" && options.session.trim()) return options.session.trim()
+    if (typeof process.env.BAILUCODE_SESSION === "string" && process.env.BAILUCODE_SESSION.trim()) {
+      return process.env.BAILUCODE_SESSION.trim()
+    }
+    const files = [...(typeof options.sessionFile === "string" ? [options.sessionFile] : []), ...SESSION_CANDIDATES]
+    for (const file of files) {
+      try {
+        const text = fs.readFileSync(file, "utf8").trim()
+        if (text) return text
+      } catch {}
+    }
+    return null
+  }
+
+  // The dashboard page, not an API: reads only, and the cookie never leaves.
+  async function portalDashboard(session) {
+    const res = await fetchImpl(PORTAL, {
+      method: "GET",
+      headers: {
+        cookie: session,
+        "user-agent": `magpie-bailucode/${VERSION}`,
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "zh-CN,zh;q=0.9",
+      },
+      redirect: "manual",
+      signal: AbortSignal.timeout(TIMEOUT),
+    })
+    const html = await res.text()
+    if (res.status >= 300 && res.status < 400) {
+      const error = new Error("白鹿通行证会话已过期")
+      error.expired = true
+      throw error
+    }
+    if (!res.ok) {
+      const error = new Error(res.status === 403 ? CLOUDFLARE_HINT : `门户返回 HTTP ${res.status}`)
+      if (res.status === 403) error.cloudflare = true
+      throw error
+    }
+    const wallet = extractJson(html, "var S = ")
+    if (!wallet) {
+      const error = new Error("门户页面里没有额度数据（页面可能改版，或会话只读到了登录页）")
+      error.expired = /id="email"|发送验证码/.test(html)
+      throw error
+    }
+    const email = typeof wallet.seed === "string" && wallet.seed.includes("@") ? wallet.seed : wallet?.pw?.email
+    return { wallet, html, email }
+  }
+
   const authHook = {
     provider: PROVIDER,
     async loader(getAuth) {
@@ -171,27 +349,53 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
         prompts: [],
       },
     ],
-    // magpie 的卡片：能证明的只有「key 是否被接受」。
+    // magpie 的卡片：有通行证会话就报额度，没有就只报 key 是否被网关接受。
     async usage(getAuth) {
       const auth = await getAuth()
       if (auth?.type !== "api" || !auth.key) return null
       const base = baseOf(auth)
       const key = String(auth.key)
-      const scope = `${base}|${key.slice(-8)}`
+      const session = readSession()
+      const scope = `${base}|${key.slice(-8)}|${session ? "session" : "key"}`
       const hit = usageCache.get(scope)
       if (hit && Date.now() - hit.at < USAGE_TTL) return hit.value
+
       let value
-      try {
-        const ids = await listModels(base, auth.key, headersOf(auth))
-        value = { plan: "BAILU Open Platform", ...(ids.length ? { windows: [] } : {}) }
-        log(`BAILU: key accepted, ${ids.length} model(s) visible`)
-      } catch (error) {
-        value =
-          error?.cloudflare
-            ? { plan: "BAILU Open Platform", error: CLOUDFLARE_HINT }
-            : error?.status === 401 || error?.status === 403
-              ? { plan: "BAILU Open Platform", error: `API key 无效或已过期，去 ${KEY_PAGE} 重新生成` }
-              : { plan: "BAILU Open Platform", error: error?.message || "无法访问 BAILU 网关" }
+      if (session) {
+        try {
+          const { wallet, html, email } = await portalDashboard(session)
+          const windows = quotaWindows(wallet, html)
+          value = {
+            plan: "白鹿通行证",
+            windows,
+            ...(email ? { user: String(email) } : {}),
+            ...(wallet?.api?.ok === false ? { error: "API 额度当前不可用（门户显示未开通或已停用）" } : {}),
+          }
+          log(`BAILU: quota read — ${windows.length} window(s)`)
+        } catch (error) {
+          value = error?.expired
+            ? {
+                plan: "白鹿通行证",
+                error: `通行证会话已过期：浏览器重新登录 ${PORTAL} 后，把 Cookie 覆盖到 ${SESSION_CANDIDATES[0] ?? "session 文件"}`,
+              }
+            : error?.cloudflare
+              ? { plan: "白鹿通行证", error: CLOUDFLARE_HINT }
+              : { plan: "白鹿通行证", error: error?.message || "读不到门户额度" }
+          log(`BAILU: quota failed — ${error?.message || error}`)
+        }
+      } else {
+        try {
+          const ids = await listModels(base, auth.key, headersOf(auth))
+          value = { plan: "BAILU Open Platform", windows: [], ...(ids.length ? {} : { error: "key 看不到任何模型" }) }
+          log(`BAILU: key accepted, ${ids.length} model(s) visible`)
+        } catch (error) {
+          value =
+            error?.cloudflare
+              ? { plan: "BAILU Open Platform", error: CLOUDFLARE_HINT }
+              : error?.status === 401 || error?.status === 403
+                ? { plan: "BAILU Open Platform", error: `API key 无效或已过期，去 ${KEY_PAGE} 重新生成` }
+                : { plan: "BAILU Open Platform", error: error?.message || "无法访问 BAILU 网关" }
+        }
       }
       usageCache.set(scope, { at: Date.now(), value })
       return value
@@ -266,4 +470,9 @@ export const _internal = {
   seedEntries,
   modelIds,
   protocolOf,
+  extractJson,
+  quotaWindows,
+  resetsAtFrom,
+  fmtCN,
+  SESSION_CANDIDATES,
 }

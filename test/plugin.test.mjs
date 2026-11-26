@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 
 import { BailucodeAuthPlugin, _internal } from "../index.mjs"
 
-const { normalizeBase, modelEntry, modelIds, protocolOf, BASE, KEY_PAGE, SEED_MODELS } = _internal
+const { normalizeBase, modelEntry, modelIds, protocolOf, quotaWindows, extractJson, BASE, KEY_PAGE, SEED_MODELS } = _internal
 
 function fakeAuth(metadata = {}) {
   return { type: "api", key: "sk-live-test", metadata }
@@ -117,7 +117,7 @@ test("models asks the gateway with the key and returns what it lists", async () 
       ],
     })
   )
-  const plugin = await BailucodeAuthPlugin({}, { fetch })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: false })
   const models = await plugin.provider.models({ api: BASE }, { auth: fakeAuth() })
   assert.deepEqual(Object.keys(models).sort(), ["bailu-2.9-preview", "bailu-apex-2.7"].sort())
   assert.equal(models["bailu-2.9-preview"].provider.api, BASE)
@@ -128,7 +128,7 @@ test("models asks the gateway with the key and returns what it lists", async () 
 
 test("models keeps the known list when the key is rejected", async () => {
   const fetch = mockFetch(() => response({ error: { message: "Invalid API key", code: "invalid_api_key" } }, 401))
-  const plugin = await BailucodeAuthPlugin({}, { fetch })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: false })
   const provider = { api: BASE, models: { "seed-model": { id: "seed-model" } } }
   const models = await plugin.provider.models(provider, { auth: fakeAuth() })
   assert.deepEqual(Object.keys(models), ["seed-model"])
@@ -136,7 +136,7 @@ test("models keeps the known list when the key is rejected", async () => {
 
 test("models without a key is the config's own list", async () => {
   const fetch = mockFetch(() => response({}, 500))
-  const plugin = await BailucodeAuthPlugin({}, { fetch })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: false })
   const provider = { api: BASE, models: { "seed-model": { id: "seed-model" } } }
   const models = await plugin.provider.models(provider, { auth: { type: "api" } })
   assert.deepEqual(Object.keys(models), ["seed-model"])
@@ -145,12 +145,12 @@ test("models without a key is the config's own list", async () => {
 
 test("usage says the key is accepted, and names the page when it is not", async () => {
   const ok = mockFetch(() => response({ data: [{ id: "bailu-2.9-preview" }] }))
-  const accepted = await (await BailucodeAuthPlugin({}, { fetch: ok })).auth.usage(async () => fakeAuth())
+  const accepted = await (await BailucodeAuthPlugin({}, { fetch: ok, session: false })).auth.usage(async () => fakeAuth())
   assert.equal(accepted.plan, "BAILU Open Platform")
   assert.equal(accepted.error, undefined)
 
   const rejected = mockFetch(() => response({ error: { message: "Invalid API key" } }, 401))
-  const refused = await (await BailucodeAuthPlugin({}, { fetch: rejected })).auth.usage(async () => fakeAuth())
+  const refused = await (await BailucodeAuthPlugin({}, { fetch: rejected, session: false })).auth.usage(async () => fakeAuth())
   assert.equal(refused.plan, "BAILU Open Platform")
   assert.match(refused.error, /API key/)
   assert.ok(refused.error.includes(KEY_PAGE))
@@ -158,7 +158,7 @@ test("usage says the key is accepted, and names the page when it is not", async 
 
 test("usage names the proxy problem when Cloudflare answers instead of the gateway", async () => {
   const blocked = mockFetch(() => response("<!DOCTYPE html><title>Just a moment...</title>", 403))
-  const refused = await (await BailucodeAuthPlugin({}, { fetch: blocked })).auth.usage(async () => fakeAuth())
+  const refused = await (await BailucodeAuthPlugin({}, { fetch: blocked, session: false })).auth.usage(async () => fakeAuth())
   assert.match(refused.error, /Cloudflare/)
 })
 
@@ -166,7 +166,7 @@ test("chat.headers keeps the honest client UA that Cloudflare lets through", asy
   const plugin = await BailucodeAuthPlugin({}, {})
   const output = { headers: {} }
   await plugin["chat.headers"]({ model: "bailu-2.9-preview" }, output)
-  assert.equal(output.headers["user-agent"], "magpie-bailucode/0.1.0")
+  assert.match(output.headers["user-agent"], /^magpie-bailucode\/\d+\.\d+\.\d+$/)
   assert.equal(output.headers.accept, "application/json")
 
   const custom = await BailucodeAuthPlugin({}, { headers: { "x-team": "lab" } })
@@ -200,4 +200,75 @@ test("a different gateway comes from options or a stored address, never a prompt
 test("usage is null without a key", async () => {
   const plugin = await BailucodeAuthPlugin({}, {})
   assert.equal(await plugin.auth.usage(async () => ({ type: "api" })), null)
+})
+
+// ---- 白鹿通行证 quota ----------------------------------------------------------
+
+const WALLET = {
+  seed: "user@example.com",
+  code: { planRemain: 8000, planQuota: 8000, addonTokens: 13500000 },
+  api: { ok: true, quota: 305000000, used: 657, addonRem: 13500000, addonCons: 0, usedEff: 657, quotaEff: 318500000 },
+  packs: [{ id: "anthropic", q: 5000000, u: 0 }],
+}
+
+const DASHBOARD = `<!doctype html><html><body>
+<div class="wl-q__value"><span id="wlCodeVal">21,500</span><span class="wl-q__unit">Credits</span></div>
+<dl class="wl-kv"><dt>用量重置</dt><dd>12月3日</dd></dl>
+<script>var S = ${JSON.stringify(WALLET)};</script>
+</body></html>`
+
+test("quotaWindows turns the portal wallet into the three lines the dashboard shows", () => {
+  const windows = quotaWindows(WALLET, DASHBOARD, new Date("2026-11-26T10:00:00+08:00"))
+  assert.equal(windows.length, 3)
+  const [code, api, pack] = windows
+  assert.equal(code.name, "白鹿编码")
+  assert.equal(code.display, "21,500 Credits") // 8,000 plan + 13,500 add-on
+  assert.equal(code.limit, 21500)
+  assert.equal(code.used, 0)
+
+  assert.equal(api.name, "API 平台")
+  assert.equal(api.display, "657 / 3.18 亿 Tokens")
+  assert.equal(api.limit, 318500000)
+  assert.ok(api.used < 0.01)
+  assert.equal(api.resetsAt, "2026-12-02T16:00:00.000Z") // 12月3日 00:00 +08:00
+
+  assert.equal(pack.name, "Anthropic 协议 定向")
+  assert.equal(pack.display, "剩 500 万 / 共 500 万 Tokens")
+  assert.equal(pack.aside, true)
+})
+
+test("extractJson follows braces inside strings", () => {
+  const html = `<script>var S = {"a":"}not the end{","b":{"c":1}}; var T = 1;</script>`
+  const got = extractJson(html, "var S = ")
+  assert.deepEqual(got, { a: "}not the end{", b: { c: 1 } })
+  assert.equal(extractJson("<html>no wallet</html>", "var S = "), null)
+})
+
+test("usage reads the portal when a session is configured", async () => {
+  const fetch = mockFetch(() => response(DASHBOARD, 200))
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "session_token=abc; PHPSESSID=def" })
+  const usage = await plugin.auth.usage(async () => fakeAuth())
+  assert.equal(usage.plan, "白鹿通行证")
+  assert.equal(usage.user, "user@example.com")
+  assert.equal(usage.windows.length, 3)
+  const [call] = fetch.calls
+  assert.equal(call.url, "https://bailucode.com/auth/")
+  assert.equal(call.init.headers.cookie, "session_token=abc; PHPSESSID=def")
+})
+
+test("an expired portal session says so and where to refresh it", async () => {
+  const fetch = mockFetch(() => ({ ok: false, status: 302, headers: new Headers({ location: "/auth/login" }), text: async () => "" }))
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "session_token=old" })
+  const usage = await plugin.auth.usage(async () => fakeAuth())
+  assert.equal(usage.plan, "白鹿通行证")
+  assert.match(usage.error, /会话已过期/)
+  assert.match(usage.error, /session\.txt|session/)
+})
+
+test("without a session the card falls back to the key check, never the portal", async () => {
+  const fetch = mockFetch(() => response({ data: [{ id: "bailu-2.9-preview" }] }))
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: false })
+  const usage = await plugin.auth.usage(async () => fakeAuth())
+  assert.equal(usage.plan, "BAILU Open Platform")
+  assert.equal(fetch.calls[0].url, `${BASE}/models`)
 })
