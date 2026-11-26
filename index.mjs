@@ -177,11 +177,14 @@ const fmtCN = (value) => {
 function resetsAtFrom(html, now = new Date()) {
   const match = typeof html === "string" ? html.match(/用量重置<\/dt>\s*<dd[^>]*>\s*(\d{1,2})月(\d{1,2})日/) : null
   if (!match) return undefined
+  // the portal's day is Asia/Shanghai whatever this machine's clock is set to
+  const shifted = new Date(now.getTime() + 8 * 3600_000)
   const month = Number(match[1])
   const day = Number(match[2])
-  const at = new Date(now.getFullYear(), month - 1, day, 0, 0, 0, 0)
-  if (at.getTime() < now.getTime() - 24 * 3600 * 1000) at.setFullYear(at.getFullYear() + 1)
-  return at.toISOString()
+  const build = (year) => Date.UTC(year, month - 1, day) - 8 * 3600_000
+  let at = build(shifted.getUTCFullYear())
+  if (at < now.getTime() - 24 * 3600_000) at = build(shifted.getUTCFullYear() + 1)
+  return new Date(at).toISOString()
 }
 
 const PACK_LABELS = { anthropic: "Anthropic 协议 定向" }
