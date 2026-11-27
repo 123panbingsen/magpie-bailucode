@@ -634,6 +634,20 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
         prompts: [],
       },
       {
+        // 贴 Cookie 的登录方式：额度与签到都靠它，key 仍然是必填的那一枚。
+        type: "api",
+        label: "粘贴通行证 Cookie（显示额度、可签到；仍需上面的 API key）",
+        placeholder: "auth/ 请求里的 Cookie 整行",
+        prompts: [
+          {
+            type: "text",
+            key: "session",
+            message: "浏览器 F12 → Network → 刷新 → 第一条 auth/ 请求 → Request Headers 的 Cookie 整行",
+            placeholder: "session_token=…; PHPSESSID=…",
+          },
+        ],
+      },
+      {
         type: "oauth",
         label: "浏览器登录白鹿通行证（自动取 key + 显示额度）",
         // magpie 的 oauth 约定：authorize 先交回一个会话（url/instructions/callback），

@@ -497,3 +497,13 @@ test("the portal login is stored on the account, and any named file is 0600", as
   if (process.platform !== "win32") assert.equal(fs.statSync(tmp).mode & 0o777, 0o600)
   fs.rmSync(tmp, { force: true })
 })
+
+test("a cookie can be pasted on the key route too", async () => {
+  const plugin = await BailucodeAuthPlugin({}, {})
+  const withCookie = plugin.auth.methods.find((m) => String(m.label).includes("Cookie"))
+  assert.ok(withCookie, "no cookie route")
+  assert.equal(withCookie.type, "api")
+  const [prompt] = withCookie.prompts || []
+  assert.equal(prompt.key, "session")
+  assert.match(prompt.message, /Cookie/)
+})
