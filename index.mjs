@@ -732,7 +732,8 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
     // magpie 的签到钩子（契约抄自 host 源码）：
     // outcome: claimed | done | ineligible | inactive | captcha | failed,
     // 另有 credit / streak / message / until（厂商自己的一天什么时候翻）。
-    async checkin(getAuth) {
+    async checkin(getAuth, provider) {
+      log(`checkin options: ${Object.keys(options).join(",") || "(none)"} | provider: ${provider?.id || "?"}`)
       const auth = await getAuth()
       if (auth?.type !== "api" || !auth.key) return { outcome: "ineligible", message: "还没有登录" }
       const jar = readSession(auth)
