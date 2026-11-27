@@ -507,3 +507,16 @@ test("a cookie can be pasted on the key route too", async () => {
   assert.equal(prompt.key, "session")
   assert.match(prompt.message, /Cookie/)
 })
+
+test("a check-in the vendor has switched off reads as ineligible, not failed", async () => {
+  const claims = [{ id: "checkin", title: "白鹿编码签到", reward: 10500000, purpose: "checkin", claimed: false }]
+  const fetch = mockFetch((url, init) => {
+    if (init?.method === "POST") return response({ success: false, message: "Unsupported action" }, 400)
+    return response(dashboardWith(claims), 200)
+  })
+  const plugin = await BailucodeAuthPlugin({}, { fetch, session: "a=b" })
+  const got = await plugin.auth.checkin(async () => fakeAuth())
+  assert.equal(got.outcome, "ineligible")
+  assert.match(got.message, /暂时关闭/)
+  assert.ok(got.until)
+})

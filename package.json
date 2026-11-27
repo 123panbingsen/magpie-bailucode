@@ -1,6 +1,6 @@
 {
   "name": "magpie-bailucode",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "BAILU AI (bailucode.com) for magpie: one API key, or a browser sign-in that fetches the key from the portal for you; models discovered from the key, and the 白鹿通行证 quota (credits, tokens, per-protocol packs) on the card.",
   "type": "module",
   "main": "./index.mjs",

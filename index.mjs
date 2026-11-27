@@ -778,6 +778,16 @@ export async function BailucodeAuthPlugin({ client, magpie } = {}, options = {})
           credit += Number(claim.reward) || 0
           continue
         }
+        // 门户自己把这条链路关了：action 不认（Unsupported action），或它的
+        // Cap 通道 404。这不是我们的 key 坏了，也不是「今天已经领过」。
+        if (/Unsupported action|无效的操作/.test(String(data?.message || ""))) {
+          usageCache.clear()
+          return {
+            outcome: "ineligible",
+            message: `门户的签到接口暂时关闭（${data?.message || "Unsupported action"}），等白鹿恢复后这一天会自动领`,
+            until: midnight,
+          }
+        }
         if (/人机验证|安全验证|滑块/.test(String(data?.message || ""))) {
           usageCache.clear()
           return {
